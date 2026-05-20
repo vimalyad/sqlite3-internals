@@ -1,96 +1,69 @@
-Reader Writer Problem
-─────────────────────────────────────────────────────────────────────────────
-When the readers are frequently locking the resource and the writer is not
-getting the chance to write. This mainly happens when a proper solution to
-this problem is not implemented.
+# SQLite Concurrency & Journaling
 
-The new SQLite version introduced a new locking and journaling mechanism
-designed to improve concurrency and to reduce the writer-starvation problem.
-The new mechanism also allows atomic commits of transactions involving multiple
-database files.
+## The Reader-Writer Problem
 
-Pager Module
-─────────────────────────────────────────────────────────────────────────────
-It is responsible for making SQLite "ACID" (Atomic, Consistent, Isolated,
-and Durable).
+When readers continuously hold locks on a shared resource, writers are starved of access. This typically occurs when no proper solution to the problem has been implemented.
 
-It ensures changes happen all at once, that either all changes occur or none
-of them do, that two or more processes do not try to access the database in
-incompatible ways at the same time, and that once changes have been written
-they persist until explicitly deleted.
+SQLite's newer locking and journaling mechanism was designed to improve concurrency, reduce writer starvation, and support atomic commits across transactions involving multiple database files.
 
-It also provides a memory cache of some of the contents of the disk file.
+---
 
-Locking
-─────────────────────────────────────────────────────────────────────────────
-UNLOCKED
-No locks are held on the database by anyone. No data present in cache is
-treated as correct until verified. Anyone can read/write (no one has
-claimed access yet).
+## The Pager Module
 
-SHARED
-The database is only allowed to be read, not written. Many different
-readers are allowed to read by holding the SHARED lock. A write is only
-allowed if there are no readers holding the lock.
+The Pager module is responsible for making SQLite ACID — Atomic, Consistent, Isolated, and Durable.
 
-RESERVED
-It means that a process is planning on writing in the future. There is
-only one RESERVED lock, but at the same time multiple SHARED locks may
-coexist. RESERVED differs from PENDING in that new SHARED locks can be
-acquired while there is a RESERVED lock.
+It ensures that changes happen all at once: either all of them occur, or none do. It prevents two or more processes from accessing the database in incompatible ways simultaneously, and guarantees that once changes are written, they persist until explicitly deleted.
 
-PENDING
-It means that a process is planning on writing as soon as all shared
-locks are released so that it can get an EXCLUSIVE lock. No new shared
-locks are permitted against the database if a PENDING lock is active,
-though existing SHARED locks are allowed to continue.
+The Pager also maintains an in-memory cache of portions of the disk file.
 
-EXCLUSIVE
-It is needed to write to the database. Only one EXCLUSIVE lock is allowed
-on the file and no other locks of any kind are allowed to coexist with
-an EXCLUSIVE lock. In order to maximize concurrency, SQLite works to
-minimize the amount of time that EXCLUSIVE locks are held.
+---
 
-The operating system interface layer understands and tracks all five locking
-states. The pager module tracks only four of them since a PENDING lock is just
-temporary.
+## Locking
 
-Rollback Journal
-─────────────────────────────────────────────────────────────────────────────
-It is an ordinary disk file that is always located in the same directory as
-the database file. It has the same name as the database file with the
-addition of "-journal" suffix.
+SQLite uses five distinct locking states to manage concurrent access.
 
-It stores the initial size of the database so, in case it grows in the
-future, it can be tracked back to normal in a rollback.
+**UNLOCKED** — No locks are held by anyone. Cached data is not treated as correct until verified. No process has yet claimed any form of access.
 
-Super Journal
-─────────────────────────────────────────────────────────────────────────────
-When we have multiple databases working together (using the ATTACH command),
-each database has its own rollback journal as well as a string which stores
-the name of the super journal.
+**SHARED** — The database may be read but not written. Multiple readers may hold a SHARED lock simultaneously. A write is only permitted once no SHARED locks remain.
 
-A super journal is a file—specifically an aggregate journal—that contains
-the names of all the database's rollback journals currently working
-together. It is created when there is any transaction going on between
-databases or when the databases are not ATTACHed.
+**RESERVED** — A process intends to write in the future but has not yet begun. Only one RESERVED lock may exist at a time, but it can coexist with multiple SHARED locks. Unlike PENDING, new SHARED locks may still be acquired while a RESERVED lock is active.
 
-Hot Journals
-─────────────────────────────────────────────────────────────────────────────
-If the application or the host computer crashes, the journal or write-ahead
-log—which contains information needed to restore the database file to its
-consistent state—may be left behind.
+**PENDING** — A process is waiting to write as soon as all existing SHARED locks are released, at which point it will escalate to EXCLUSIVE. While a PENDING lock is active, no new SHARED locks are granted, though existing ones are allowed to finish.
 
-It is created only when there is an update going on the database and the
-process or application itself crashes. Since these chances are quite low, we
-almost never see them.
+**EXCLUSIVE** — Required for any write operation. Only one EXCLUSIVE lock is permitted at a time, and no other lock of any kind may coexist with it. SQLite minimizes the duration of EXCLUSIVE locks to keep concurrency as high as possible.
 
-A journal is said to be hot if:
-• It exists,
-• Its size is greater than 512 bytes,
-• The journal header is non-zero and well-formed,
-• Its super-journal exists or the super-journal name is an empty string,
-• There is no RESERVED lock on the corresponding database file.
+The operating system interface layer tracks all five states. The Pager module tracks only four, as the PENDING state is transient.
 
-Before reading from a database file, SQLite always checks whether there is any
-hot journal. If it exists, it is used to roll back to a consistent state.
+---
+
+## Rollback Journal
+
+The rollback journal is an ordinary disk file located in the same directory as the database file. Its name matches the database file with a `-journal` suffix appended.
+
+It records the initial size of the database so that, if the database grows during a transaction, it can be restored to its original size on rollback.
+
+---
+
+## Super Journal
+
+When multiple databases are used together via the `ATTACH` command, each database maintains its own rollback journal along with a string that stores the name of the super journal.
+
+A super journal is an aggregate journal file that holds the names of all rollback journals involved in a cross-database transaction. It is created whenever a transaction spans multiple databases, or when the databases involved are not attached to one another.
+
+---
+
+## Hot Journals
+
+If an application or host machine crashes mid-write, the journal or write-ahead log may be left on disk. This file contains the information needed to restore the database to a consistent state.
+
+A hot journal is only created when a write is in progress at the time of the crash. Since this is relatively rare, hot journals are seldom encountered in practice.
+
+A journal is considered hot if all of the following are true:
+
+- It exists on disk.
+- Its size exceeds 512 bytes.
+- Its header is non-zero and well-formed.
+- Its super journal exists, or the super journal name is an empty string.
+- No RESERVED lock is held on the corresponding database file.
+
+Before reading from a database file, SQLite always checks for the presence of a hot journal. If one is found, it is used to roll the database back to a consistent state before any read proceeds
